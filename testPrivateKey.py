@@ -12,10 +12,10 @@ from nacl.encoding import HexEncoder
 # ==========================================
 
 # 1. 填入你抓到的 JWT
-JWT_TOKEN = "eyJhbGciOiJFUzI1NiIsImtpZCI6IlhnaEJQSVNuN0RQVHlMcWJtLUVHVkVhOU1lMFpwdU9iMk1Qc2gtbUFlencifQ.eyJhIjoiMHhGZWMzNWFGNDk2ZGEyMEUwZThlMTBjNEMyQjdiODQ0Yzk4OTkwOUJlIiwiYyI6ImJzYyIsIm4iOiJXU2JQYnVwaDFJZDU5NG1GcyIsImkiOiIyMDI2LTAxLTEzVDEwOjEwOjA3LjY0MFoiLCJzIjoiaUdTQUlPWDMzK1h2MFpWREZFQ1d5ZFVUcEJmVlo1NFZDWnNxUVpoWXNsUTk2VzQrZUFBRzArcXdWMUNaZ1YxeUltN1hHWXNBYmxJY3puVUFjMFZ1M0JzPSIsInIiOiJtVEdqdDNGZzlYUTJOcXNOWDNCbWhZbUQ5SkVhN2llbVJYOU1xYzZSTVpGIiwidyI6MiwiaWF0IjoxNzY4Mjk5MDE0LCJleHAiOjE3Njg5MDM4MTR9.ARLPN9ipwKZlcNADxa_rwWriKWfZ8cHd0pdpAzEWYmMpM21mxHKT0FM-9KvrcNNarvSpqqh_Xc7Bb6yTS-_zEw" 
+JWT_TOKEN = "" 
 
 # 2. 填入你抓到的 'd' 值 (那串 43 個字的亂碼)
-D_VALUE_BASE64 = "QlYuFADkciO6T6HFKxb3rJJqu1M5uMAbJwJDhx4GPRE" 
+D_VALUE_BASE64 = "" 
 
 # ==========================================
 # 驗證邏輯
