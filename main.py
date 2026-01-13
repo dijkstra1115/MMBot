@@ -7,17 +7,21 @@ import os
 import sys
 import threading
 import websocket  # 需安裝: pip install websocket-client
+import math
 from datetime import datetime
 from nacl.signing import SigningKey
 from nacl.encoding import HexEncoder
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # ==========================================
 # ⚙️ 機器人設定區
 # ==========================================
 
 # 1. 帳戶資訊
-JWT_TOKEN = ""
-PRIVATE_KEY_HEX = ""
+JWT_TOKEN = os.getenv("JWT_TOKEN")
+PRIVATE_KEY_HEX = os.getenv("PRIVATE_KEY_HEX")
 
 # 2. 交易標的
 SYMBOL = "BTC-USD"
@@ -170,7 +174,7 @@ class StandXBot:
             "side": side,
             "order_type": "limit",
             "qty": ORDER_QTY,
-            "price": f"{price:.2f}",
+            "price": f"{int(price)}",
             "time_in_force": "gtc",
             "reduce_only": False
         }
@@ -274,13 +278,13 @@ def run_strategy():
 
             # 3. 計算目標
             bps_decimal = TARGET_BPS / 10000
-            target_buy = mid_price * (1 - bps_decimal)
-            target_sell = mid_price * (1 + bps_decimal)
+            target_buy = math.floor(mid_price * (1 - bps_decimal))
+            target_sell = math.ceil(mid_price * (1 + bps_decimal))
 
             # 4. 監控與補單
             open_orders = bot.get_open_orders()
             active_buy = False
-            active_sell = False
+            active_sell = False 
 
             for order in open_orders:
                 oid = order['id']
@@ -296,28 +300,28 @@ def run_strategy():
                     if oside == 'sell': active_sell = True
 
             if not active_buy:
-                res = bot.place_order('buy', target_buy)
+                res = bot.place_order('buy', target_buy) 
                 if 'code' in res and res['code'] == 0:
-                    actions_log.append(f"✅ 掛買單 @ {target_buy:.2f}")
+                    actions_log.append(f"✅ 掛買單 @ {int(target_buy)}")
             
             if not active_sell:
-                res = bot.place_order('sell', target_sell)
+                res = bot.place_order('sell', target_sell) 
                 if 'code' in res and res['code'] == 0:
-                    actions_log.append(f"✅ 掛賣單 @ {target_sell:.2f}")
+                    actions_log.append(f"✅ 掛賣單 @ {int(target_sell)}")
 
             # 5. 介面
             os.system('cls') # Windows 請改 cls
             print(f"=== 🛡️ Procyons-StandxMM巧克力策略（挖礦躺分） ===")
             print(f"⏰台灣時間現在： {datetime.now().strftime('%H:%M:%S')}")
-            print(f"📊 即時價格: {mid_price:,.2f} ({price_source})")
+            print(f"📊 即時價格: {int(mid_price):,} ({price_source})")
             if bot.depth.ready:
-                print(f"🟢 買方單: {bot.depth.bid:,.2f} 🔴 賣方單: {bot.depth.ask:,.2f}")
+                print(f"🟢 買方單: {int(bot.depth.bid):,} 🔴 賣方單: {int(bot.depth.ask):,}")
             print(f"🛡️ 現在持倉:(0) 非常的安全不要緊張 ")
             print("-" * 40)
             if not open_orders: print(" (無掛單，正在補單...)")
             for o in open_orders:
                 d_bps = abs(mid_price - float(o['price'])) / mid_price * 10000
-                print(f" [{o['side'].upper()}] {o['price']} (距 {d_bps:.1f}bps)")
+                print(f" [{o['side'].upper()}] {int(float(o['price']))} (距 {d_bps:.1f}bps)")
             print("-" * 40)
             for log in actions_log: print(log)
 
