@@ -29,8 +29,8 @@ BASE_URL = "https://perps.standx.com"
 
 # 3. 策略參數
 ORDER_QTY = "0.096"       # 掛單數量，我預設0.1btc你們自己改
-TARGET_BPS = 7           # 預設掛單位置 (8 bps)
-MIN_BPS = 6              # < 6 bps 撤單
+TARGET_BPS = 8           # 預設掛單位置 (8 bps)
+MIN_BPS = 7              # < 7 bps 撤單
 MAX_BPS = 10             # > 10 bps 重掛
 
 REFRESH_RATE = 0.2       # 刷新頻率 (秒)
