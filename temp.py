@@ -9,8 +9,7 @@ import sys
 import threading
 import websocket  # 需安裝: pip install websocket-client
 import math
-from datetime import datetime, timedelta
-from collections import deque  # [新增] 用於儲存歷史價格
+from datetime import datetime
 from nacl.signing import SigningKey
 from nacl.encoding import HexEncoder
 
@@ -35,19 +34,12 @@ SYMBOL = "BTC-USD"
 BASE_URL = "https://perps.standx.com"
 
 # 3. 策略參數
-ORDER_QTY = "0.09"      # 掛單數量
-TARGET_BPS = 8          # 預設掛單位置 (8 bps)
-MIN_BPS = 7             # < 7 bps 撤單
-MAX_BPS = 10            # > 10 bps 重掛
+ORDER_QTY = "0.09"       # 掛單數量，我預設0.1btc你們自己改
+TARGET_BPS = 8           # 預設掛單位置 (8 bps)
+MIN_BPS = 7              # < 7 bps 撤單
+MAX_BPS = 10             # > 10 bps 重掛
 
-# 4. [修改] 波動保護參數
-MAX_SAFE_SPREAD = 25      # 價差 > 25 bps 強制撤單
-MAX_TREND_10S = 0.001     # [新增] 10秒內波動 > 0.1% (0.001)
-MAX_TREND_20S = 0.0015    # [新增] 20秒內波動 > 0.15% (0.0015)
-VOLATILITY_COOLDOWN = 300 # 觸發保護後的冷靜期 (秒) = 5分鐘
-
-REFRESH_RATE = 0.2        # 刷新頻率 (秒)
-
+REFRESH_RATE = 0.2       # 刷新頻率 (秒)
 # ==========================================
 # 🔑 d 值轉換函數
 # ==========================================
@@ -180,9 +172,12 @@ class StandXBot:
 
     def get_position(self):
         try:
+            
             ts = int(time.time() * 1000)
             res = self.session.get(f"{self.base_url}/api/query_positions?symbol={SYMBOL}&t={ts}", timeout=2)
             data = res.json()
+            
+            
             if isinstance(data, list):
                 if len(data) > 0: return data[0]
             elif isinstance(data, dict) and 'result' in data:
@@ -222,6 +217,7 @@ class StandXBot:
 
     def market_close(self, side, qty):
         endpoint = "/api/new_order"
+        
         qty_str = str(abs(float(qty)))
         payload = {
             "symbol": SYMBOL,
@@ -264,13 +260,8 @@ def run_strategy():
         return
 
     bot = StandXBot(JWT_TOKEN, private_key_hex)
-    print("🚀 盜用狗會破產，我說真的 (10s/20s 趨勢保護版)...")
+    print("🚀 盜用狗會破產，我說真的...")
     time.sleep(2) 
-    
-    resume_time = datetime.min # 初始化恢復時間
-    
-    # [新增] 用來儲存價格
-    price_history = deque()
 
     while True:
         try:
@@ -279,10 +270,12 @@ def run_strategy():
             # 1. 優先檢查持倉
             position = bot.get_position()
             
+            # 判斷是否有持倉
             has_position = False
             raw_qty = 0.0
             
             if position:
+                # 嘗試讀取 qty，如果讀不到就給 0
                 raw_qty = float(position.get('qty', 0))
                 if raw_qty != 0:
                     has_position = True
@@ -294,16 +287,18 @@ def run_strategy():
                 open_orders = bot.get_open_orders()
                 for o in open_orders: bot.cancel_order(o['id'])
                 
-                # 2. 決定平倉方向
+                # 2. 決定平倉方向 (不依賴 side 欄位，直接多空都平倉)
+                # 邏輯：數量 > 0 是多單(Long) -> 要賣(Sell)
+                #       數量 < 0 是空單(Short) -> 要買(Buy)
                 if raw_qty > 0:
                     close_side = 'sell'
                 else:
                     close_side = 'buy'
                 
-                # 3. 執行平倉
+                # 3. 執行平倉 (取絕對值數量)
                 bot.market_close(close_side, abs(raw_qty))
                 
-                # 4. 暫停一下
+                # 4. 暫停一下檢查時間，避免 API 頻率限制
                 time.sleep(0.5)
                 continue
 
@@ -314,84 +309,11 @@ def run_strategy():
                 mid_price = bot.get_fallback_price()
                 price_source = "HTTP"
             
-            if mid_price is None or mid_price == 0:
+            if mid_price is None:
                 print("❌ 無法獲取價格...")
                 time.sleep(1)
                 continue
 
-            # ==========================================
-            # [修改區] 波動保護冷靜期
-            # ==========================================
-            
-            # A. 檢查是否在冷靜期 (Cooldown Check)
-            if datetime.now() < resume_time:
-                remaining = int((resume_time - datetime.now()).total_seconds())
-                price_history.clear() # 清空歷史，避免數據滯後
-                
-                os.system('cls' if os.name == 'nt' else 'clear')
-                print(f"=== ❄️ 市場趨勢過大，進入冷靜期 ❄️ ===")
-                print(f"⏰ 剩餘時間: {remaining // 60}分 {remaining % 60}秒")
-                print(f"📊 目前價格: {int(mid_price):,}")
-                print(f"🛡️ 暫停掛單中，等待行情穩定...")
-                time.sleep(1)
-                continue
-
-            # B. 檢查趨勢波動 (10秒 與 20秒)
-            current_ts = time.time()
-            price_history.append((current_ts, mid_price))
-
-            # 清除超過 20 秒的舊資料
-            while price_history and price_history[0][0] < current_ts - 20:
-                price_history.popleft()
-
-            # 計算變化率
-            trend_10s_pct = 0.0
-            trend_20s_pct = 0.0
-            
-            if price_history:
-                # 1. 計算 20秒變化
-                price_20s_ago = price_history[0][1]
-                trend_20s_pct = abs(mid_price - price_20s_ago) / price_20s_ago
-                
-                # 2. 計算 10秒變化
-                cutoff_10s = current_ts - 10
-                price_10s_ago = mid_price # 預設為當前價格
-                for t, p in price_history:
-                    if t >= cutoff_10s:
-                        price_10s_ago = p
-                        break
-                trend_10s_pct = abs(mid_price - price_10s_ago) / price_10s_ago
-
-            # C. 檢查價差 Spread
-            current_spread_bps = 0.0
-            if bot.depth.ready and bot.depth.ask > bot.depth.bid:
-                current_spread_bps = (bot.depth.ask - bot.depth.bid) / mid_price * 10000
-
-            # D. 觸發條件判斷
-            is_volatile = False
-            reason = ""
-
-            # 條件: 價差大 OR 10秒變動>0.1% OR 20秒變動>0.15%
-            if current_spread_bps > MAX_SAFE_SPREAD:
-                is_volatile = True
-                reason = f"Spread價差過大 ({current_spread_bps:.1f}bps)"
-            elif trend_10s_pct > MAX_TREND_10S: 
-                is_volatile = True
-                reason = f"10秒趨勢劇烈 ({trend_10s_pct*100:.2f}%)"
-            elif trend_20s_pct > MAX_TREND_20S:
-                is_volatile = True
-                reason = f"20秒趨勢劇烈 ({trend_20s_pct*100:.2f}%)"
-
-            if is_volatile:
-                print(f"🌊 偵測到危險行情! 原因: {reason}")
-                print(f"🛡️ 撤銷所有訂單並暫停交易 {VOLATILITY_COOLDOWN//60} 分鐘...")
-                open_orders = bot.get_open_orders()
-                for o in open_orders: bot.cancel_order(o['id'])
-                resume_time = datetime.now() + timedelta(seconds=VOLATILITY_COOLDOWN)
-                time.sleep(1)
-                continue
-            
-            # ==========================================
             # 3. 計算目標
             bps_decimal = TARGET_BPS / 10000
             target_buy = math.floor(mid_price * (1 - bps_decimal))
@@ -426,12 +348,10 @@ def run_strategy():
                     actions_log.append(f"✅ 掛賣單 @ {int(target_sell)}")
 
             # 5. 介面
-            os.system('cls' if os.name == 'nt' else 'clear')
+            os.system('cls') # Windows 請改 cls
             print(f"=== 🛡️ Procyons-StandxMM巧克力策略（挖礦躺分） ===")
             print(f"⏰台灣時間現在： {datetime.now().strftime('%H:%M:%S')}")
-            print(f"📊 即時價格: {int(mid_price):,} ({price_source}) [Spread: {current_spread_bps:.1f}bps]")
-            print(f"📈 10秒波動: {trend_10s_pct*100:.3f}% (限{MAX_TREND_10S*100}%)")
-            print(f"📈 20秒波動: {trend_20s_pct*100:.3f}% (限{MAX_TREND_20S*100}%)")
+            print(f"📊 即時價格: {int(mid_price):,} ({price_source})")
             if bot.depth.ready:
                 print(f"🟢 買方單: {int(bot.depth.bid):,} 🔴 賣方單: {int(bot.depth.ask):,}")
             print(f"🛡️ 現在持倉:(0) 非常的安全不要緊張 ")
@@ -443,26 +363,10 @@ def run_strategy():
             print("-" * 40)
             for log in actions_log: print(log)
 
-        except KeyboardInterrupt:
-            print("\n\n🛑 收到退出信號 (Ctrl+C)，正在安全退出...")
-            print("📋 正在撤銷所有掛單...")
-            try:
-                open_orders = bot.get_open_orders()
-                for o in open_orders:
-                    bot.cancel_order(o['id'])
-                    print(f"   ✅ 已撤銷訂單: {o['id']}")
-            except Exception as e:
-                print(f"   ⚠️ 撤單時發生錯誤: {e}")
-            print("👋 再見！")
-            break
         except Exception as e:
             print(f"Error: {e}")
         
         time.sleep(REFRESH_RATE)
 
 if __name__ == "__main__":
-    try:
-        run_strategy()
-    except KeyboardInterrupt:
-        print("\n\n🛑 收到退出信號 (Ctrl+C)，程序已退出")
-        sys.exit(0)
+    run_strategy()
