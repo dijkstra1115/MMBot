@@ -46,6 +46,11 @@ MAX_TREND_10S = 0.001     # [新增] 10秒內波動 > 0.1% (0.001)
 MAX_TREND_20S = 0.0015    # [新增] 20秒內波動 > 0.15% (0.0015)
 VOLATILITY_COOLDOWN = 300 # 觸發保護後的冷靜期 (秒) = 5分鐘
 
+# 5. [新增] OBI (Order Book Imbalance) 參數
+OBI_THRESHOLD = 0.6       # OBI 閾值 (0.6 表示買賣盤不平衡度 > 60%)
+OBI_COOLDOWN = 60         # OBI 觸發後的暫停時間 (秒)
+OBI_BPS_RANGE = 10        # OBI 計算範圍 (±10 bps = ±0.1%)
+
 REFRESH_RATE = 0.2        # 刷新頻率 (秒)
 
 # ==========================================
@@ -77,8 +82,16 @@ class DepthListener:
         self.ready = False
         self.ws_url = "wss://perps.standx.com/ws-stream/v1"
         self.ws = None
+        self.ws_depth = None
+        # [新增] 深度數據
+        self.bids = []
+        self.asks = []
+        self.depth_ready = False
         self.thread = threading.Thread(target=self._run_ws, daemon=True)
         self.thread.start()
+        # [新增] 深度 WebSocket 線程
+        self.thread_depth = threading.Thread(target=self._run_ws_depth, daemon=True)
+        self.thread_depth.start()
 
     def _on_open(self, ws):
         print("✅ 即時監控買賣單數據Procyons版本連線 (Price Channel)...")
@@ -106,6 +119,45 @@ class DepthListener:
                     self.ready = True
         except: pass
 
+    def _on_open_depth(self, ws):
+        subscribe_msg = {
+            "subscribe": {
+                "channel": "depth_book",
+                "symbol": SYMBOL
+            }
+        }
+        ws.send(json.dumps(subscribe_msg))
+
+    def _on_message_depth(self, ws, message):
+        try:
+            raw_data = json.loads(message)
+            if raw_data.get("channel") == "depth_book" and "data" in raw_data:
+                data = raw_data["data"]
+                if "bids" in data:
+                    self.bids = data["bids"]
+                if "asks" in data:
+                    self.asks = data["asks"]
+                if self.bids and self.asks:
+                    self.depth_ready = True
+        except: pass
+
+    def _on_error_depth(self, ws, error):
+        pass
+
+    def _on_close_depth(self, ws, close_status_code, close_msg):
+        time.sleep(5)
+        self._run_ws_depth()
+
+    def _run_ws_depth(self):
+        self.ws_depth = websocket.WebSocketApp(
+            self.ws_url,
+            on_open=self._on_open_depth,
+            on_message=self._on_message_depth,
+            on_error=self._on_error_depth,
+            on_close=self._on_close_depth
+        )
+        self.ws_depth.run_forever()
+
     def _on_error(self, ws, error):
         print(f"⚠️ WebSocket 錯誤: {error}")
 
@@ -129,6 +181,44 @@ class DepthListener:
             elif self.bid > 0 and self.ask > 0: return (self.bid + self.ask) / 2
             elif self.last_price > 0: return self.last_price
         return None
+
+    def calculate_obi(self, mid_price):
+        """
+        計算 OBI (Order Book Imbalance) 指標
+        計算 ±0.1% (10 bps) 範圍內的買賣盤總量不平衡度
+        
+        OBI = (買盤總量 - 賣盤總量) / (買盤總量 + 賣盤總量)
+        範圍: -1 到 1，正數表示買盤多，負數表示賣盤多
+        """
+        if not self.depth_ready or not mid_price or mid_price == 0:
+            return None
+        
+        # 計算價格範圍 (±0.1% = 10 bps)
+        price_range_pct = OBI_BPS_RANGE / 10000.0
+        lower_bound = mid_price * (1 - price_range_pct)  # 買盤上限
+        upper_bound = mid_price * (1 + price_range_pct)  # 賣盤下限
+        
+        # 計算買盤總量 (價格在 [lower_bound, mid_price] 範圍內)
+        bid_total = 0.0
+        for price_str, qty_str in self.bids:
+            price = float(price_str)
+            if price >= lower_bound and price <= mid_price:
+                bid_total += float(qty_str)
+        
+        # 計算賣盤總量 (價格在 [mid_price, upper_bound] 範圍內)
+        ask_total = 0.0
+        for price_str, qty_str in self.asks:
+            price = float(price_str)
+            if price >= mid_price and price <= upper_bound:
+                ask_total += float(qty_str)
+        
+        # 計算 OBI
+        total_volume = bid_total + ask_total
+        if total_volume == 0:
+            return None
+        
+        obi = (bid_total - ask_total) / total_volume
+        return obi
 
 # ==========================================
 # 🔐 交易 API
@@ -367,27 +457,41 @@ def run_strategy():
             if bot.depth.ready and bot.depth.ask > bot.depth.bid:
                 current_spread_bps = (bot.depth.ask - bot.depth.bid) / mid_price * 10000
 
-            # D. 觸發條件判斷
+            # D. 檢查 OBI (Order Book Imbalance)
+            obi_value = bot.depth.calculate_obi(mid_price)
+            obi_abs = abs(obi_value) if obi_value is not None else 0.0
+            
+            # E. 觸發條件判斷
             is_volatile = False
             reason = ""
 
-            # 條件: 價差大 OR 10秒變動>0.1% OR 20秒變動>0.15%
-            if current_spread_bps > MAX_SAFE_SPREAD:
+            # 條件: OBI 不平衡 OR 價差大 OR 10秒變動>0.1% OR 20秒變動>0.15%
+            if obi_value is not None and obi_abs > OBI_THRESHOLD:
+                is_volatile = True
+                reason = f"OBI不平衡 ({obi_value*100:.1f}%, 閾值{OBI_THRESHOLD*100:.0f}%)"
+                cooldown_seconds = OBI_COOLDOWN
+            elif current_spread_bps > MAX_SAFE_SPREAD:
                 is_volatile = True
                 reason = f"Spread價差過大 ({current_spread_bps:.1f}bps)"
+                cooldown_seconds = VOLATILITY_COOLDOWN
             elif trend_10s_pct > MAX_TREND_10S: 
                 is_volatile = True
                 reason = f"10秒趨勢劇烈 ({trend_10s_pct*100:.2f}%)"
+                cooldown_seconds = VOLATILITY_COOLDOWN
             elif trend_20s_pct > MAX_TREND_20S:
                 is_volatile = True
                 reason = f"20秒趨勢劇烈 ({trend_20s_pct*100:.2f}%)"
+                cooldown_seconds = VOLATILITY_COOLDOWN
 
             if is_volatile:
                 print(f"🌊 偵測到危險行情! 原因: {reason}")
-                print(f"🛡️ 撤銷所有訂單並暫停交易 {VOLATILITY_COOLDOWN//60} 分鐘...")
+                if obi_value is not None and obi_abs > OBI_THRESHOLD:
+                    print(f"🛡️ 撤銷所有訂單並暫停交易 {cooldown_seconds} 秒...")
+                else:
+                    print(f"🛡️ 撤銷所有訂單並暫停交易 {cooldown_seconds//60} 分鐘...")
                 open_orders = bot.get_open_orders()
                 for o in open_orders: bot.cancel_order(o['id'])
-                resume_time = datetime.now() + timedelta(seconds=VOLATILITY_COOLDOWN)
+                resume_time = datetime.now() + timedelta(seconds=cooldown_seconds)
                 time.sleep(1)
                 continue
             
@@ -432,6 +536,17 @@ def run_strategy():
             print(f"📊 即時價格: {int(mid_price):,} ({price_source}) [Spread: {current_spread_bps:.1f}bps]")
             print(f"📈 10秒波動: {trend_10s_pct*100:.3f}% (限{MAX_TREND_10S*100}%)")
             print(f"📈 20秒波動: {trend_20s_pct*100:.3f}% (限{MAX_TREND_20S*100}%)")
+            if obi_value is not None:
+                obi_status = "🟢" if obi_abs <= OBI_THRESHOLD else "🔴"
+                if abs(obi_value) < 0.01:
+                    obi_direction = "平衡"
+                elif obi_value > 0:
+                    obi_direction = "買盤多"
+                else:
+                    obi_direction = "賣盤多"
+                print(f"📊 OBI指標: {obi_status} {obi_value*100:.1f}% ({obi_direction}, 閾值{OBI_THRESHOLD*100:.0f}%)")
+            else:
+                print(f"📊 OBI指標: ⚠️ 數據未就緒")
             if bot.depth.ready:
                 print(f"🟢 買方單: {int(bot.depth.bid):,} 🔴 賣方單: {int(bot.depth.ask):,}")
             print(f"🛡️ 現在持倉:(0) 非常的安全不要緊張 ")
