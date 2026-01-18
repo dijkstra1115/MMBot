@@ -2,3 +2,4 @@ requests
 websocket-client
 PyNaCl
 python-dotenv
+base58

@@ -2,6 +2,7 @@ import requests
 import time
 import json
 import uuid
+import base58
 import base64
 import binascii
 import os
@@ -34,15 +35,15 @@ log = logging.getLogger(__name__)
 # ==========================================
 
 # 身份認證
-AUTH_TOKEN = os.getenv("JWT_TOKEN")  # JWT 認證令牌，用於 API 身份驗證
-D_VALUE_B64 = os.getenv("D_VALUE_BASE64")  # Base64 編碼的私鑰 d 值，用於簽名交易請求
+API_KEY = os.getenv("API_KEY")  # API 認證令牌，用於 API 身份驗證
+SIGNING_KEY = os.getenv("SIGNING_KEY")  # Base58 編碼的私鑰，用於簽名交易請求
 
 # 交易對設定
 TRADING_PAIR = "BTC-USD"  # 交易對符號
 API_BASE_URL = "https://perps.standx.com"  # API 基礎網址
 
 # 做市策略配置
-ORDER_SIZE = "0.1"  # 每筆訂單大小，要注意單位是 "幣", 500u 40x槓桿大概能開 0.09 (多空都開)
+ORDER_SIZE = "0.226"  # 每筆訂單大小，要注意單位是 "幣", 500u 40x槓桿大概能開 0.09 (多空都開)
 SPREAD_TARGET_BPS = 8  # 目標價差（基點），用於計算掛單價格
 SPREAD_MIN_BPS = 7  # 最小價差（基點），低於此值會撤單
 SPREAD_MAX_BPS = 10  # 最大價差（基點），超過此值會撤單
@@ -55,9 +56,9 @@ MARKET_PAUSE_DURATION = 300  # 市場波動觸發的暫停時間（秒）
 POSITION_PAUSE_DURATION = 300  # 吃單後的冷靜期時間（秒）
 
 # OBI 訂單簿不平衡參數
-ORDERBOOK_IMBALANCE_LIMIT = 0.9  # 訂單簿不平衡閾值（0-1），超過會暫停交易
-ORDERBOOK_PAUSE_DURATION = 60  # OBI 觸發的暫停時間（秒）
-ORDERBOOK_PRICE_RANGE_BPS = 10  # 計算 OBI 的價格範圍（基點）
+ORDERBOOK_IMBALANCE_LIMIT = 0.85  # 訂單簿不平衡閾值（0-1），超過會暫停交易
+ORDERBOOK_PAUSE_DURATION = 180  # OBI 觸發的暫停時間（秒）
+ORDERBOOK_PRICE_RANGE_BPS = 20  # 計算 OBI 的價格範圍（基點）
 
 # 系統參數
 LOOP_INTERVAL = 0.2  # 主循環間隔時間（秒）
@@ -71,17 +72,14 @@ trading_bot = None
 # 🔐 密鑰轉換工具
 # ==========================================
 
-def decode_base64_private_key(b64_string):
-    """將 Base64 編碼的私鑰轉換為十六進制格式"""
+def decode_base58_private_key(b58_string):
+    """將 Base58 編碼的私鑰轉換為十六進制格式（純十六進制字符串，不帶 0x 前綴）"""
     try:
-        padding_needed = len(b64_string) % 4
-        if padding_needed:
-            b64_string += '=' * (4 - padding_needed)
-        decoded_bytes = base64.urlsafe_b64decode(b64_string)
-        hex_format = "0x" + binascii.hexlify(decoded_bytes).decode('utf-8')
+        decoded_bytes = base58.b58decode(b58_string)
+        hex_format = binascii.hexlify(decoded_bytes).decode('utf-8')
         return hex_format
     except Exception as err:
-        log.error(f"Base64 密鑰解碼失敗: {err}")
+        log.error(f"Base58 密鑰解碼失敗: {err}")
         return None
 
 # ==========================================
@@ -299,6 +297,240 @@ class MarketDataStream:
             
             imbalance = (total_bid_volume - total_ask_volume) / combined_volume
             return imbalance
+    
+    def get_orderbook_depth(self, reference_price):
+        """
+        獲取 ORDERBOOK_PRICE_RANGE_BPS 範圍內的訂單簿深度
+        返回: (買盤總量, 賣盤總量, 總深度)
+        """
+        if not self.depth_data_ready or not reference_price or reference_price == 0:
+            return None, None, None
+        
+        with self.data_lock:
+            # 計算價格範圍
+            range_factor = ORDERBOOK_PRICE_RANGE_BPS / 10000.0
+            lower_price_bound = reference_price * (1 - range_factor)
+            upper_price_bound = reference_price * (1 + range_factor)
+            
+            # 統計買盤量
+            total_bid_volume = 0.0
+            for price_level, volume_str in self.bid_levels:
+                try:
+                    level_price = float(price_level)
+                    if lower_price_bound <= level_price <= reference_price:
+                        total_bid_volume += float(volume_str)
+                except:
+                    pass
+            
+            # 統計賣盤量
+            total_ask_volume = 0.0
+            for price_level, volume_str in self.ask_levels:
+                try:
+                    level_price = float(price_level)
+                    if reference_price <= level_price <= upper_price_bound:
+                        total_ask_volume += float(volume_str)
+                except:
+                    pass
+            
+            total_depth = total_bid_volume + total_ask_volume
+            return total_bid_volume, total_ask_volume, total_depth
+    
+    def get_detailed_orderbook_depth(self, reference_price):
+        """
+        獲取 ORDERBOOK_PRICE_RANGE_BPS 範圍內每個價格檔位的詳細深度
+        返回: {
+            'bid_levels': [(價格, 深度), ...],  # 買盤檔位列表，按價格降序
+            'ask_levels': [(價格, 深度), ...],  # 賣盤檔位列表，按價格升序
+            'total_bid': 總買盤量,
+            'total_ask': 總賣盤量,
+            'total_depth': 總深度
+        }
+        """
+        if not self.depth_data_ready or not reference_price or reference_price == 0:
+            return None
+        
+        with self.data_lock:
+            # 計算價格範圍
+            range_factor = ORDERBOOK_PRICE_RANGE_BPS / 10000.0
+            lower_price_bound = reference_price * (1 - range_factor)
+            upper_price_bound = reference_price * (1 + range_factor)
+            
+            # 收集買盤檔位
+            bid_levels = []
+            total_bid_volume = 0.0
+            for price_level, volume_str in self.bid_levels:
+                try:
+                    level_price = float(price_level)
+                    if lower_price_bound <= level_price <= reference_price:
+                        volume = float(volume_str)
+                        bid_levels.append((level_price, volume))
+                        total_bid_volume += volume
+                except:
+                    pass
+            
+            # 收集賣盤檔位
+            ask_levels = []
+            total_ask_volume = 0.0
+            for price_level, volume_str in self.ask_levels:
+                try:
+                    level_price = float(price_level)
+                    if reference_price <= level_price <= upper_price_bound:
+                        volume = float(volume_str)
+                        ask_levels.append((level_price, volume))
+                        total_ask_volume += volume
+                except:
+                    pass
+            
+            # 排序：買盤按價格降序，賣盤按價格升序
+            bid_levels.sort(key=lambda x: x[0], reverse=True)
+            ask_levels.sort(key=lambda x: x[0])
+            
+            return {
+                'bid_levels': bid_levels,
+                'ask_levels': ask_levels,
+                'total_bid': total_bid_volume,
+                'total_ask': total_ask_volume,
+                'total_depth': total_bid_volume + total_ask_volume
+            }
+
+# ==========================================
+# 📝 成交記錄系統
+# ==========================================
+
+class TradeLogger:
+    def __init__(self, log_filename="trades.log"):
+        """
+        初始化成交記錄器
+        log_filename: 日誌文件名，默認為 trades.log
+        """
+        self.log_filename = log_filename
+        self.log_lock = threading.Lock()
+        # 確保日誌文件存在，如果不存在則創建並寫入標題
+        self._initialize_log_file()
+    
+    def _initialize_log_file(self):
+        """初始化日誌文件，寫入表頭"""
+        try:
+            if not os.path.exists(self.log_filename):
+                with open(self.log_filename, 'w', encoding='utf-8') as f:
+                    f.write("=" * 80 + "\n")
+                    f.write("交易成交記錄日誌\n")
+                    f.write("=" * 80 + "\n")
+                    f.write(f"開始時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write("=" * 80 + "\n\n")
+        except Exception as e:
+            log.error(f"初始化日誌文件失敗: {e}")
+    
+    def log_trade(self, position_data, market_price=None, closing_info=None, 
+                  orderbook_depth=None, detailed_orderbook=None, short_term_volatility=None, mid_term_volatility=None):
+        """
+        記錄成交信息
+        
+        Args:
+            position_data: 持倉數據字典，包含 qty, side 等信息
+            market_price: 市場價格（可選）
+            closing_info: 平倉信息字典（可選），包含 close_time, close_price 等
+                          如果提供，則追加平倉信息到最新記錄；否則創建新記錄
+            orderbook_depth: 訂單簿深度元組 (買盤總量, 賣盤總量, 總深度) 或 None（已棄用，使用 detailed_orderbook）
+            detailed_orderbook: 詳細訂單簿數據字典，包含每個價格檔位的深度
+            short_term_volatility: 10秒波動率（百分比，例如 0.001 表示 0.1%）
+            mid_term_volatility: 20秒波動率（百分比，例如 0.0015 表示 0.15%）
+        """
+        try:
+            with self.log_lock:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 解析持倉信息
+                position_size = float(position_data.get('qty', 0))
+                position_side = 'LONG' if position_size > 0 else 'SHORT'
+                entry_price = position_data.get('entry_price', position_data.get('avg_price', 'N/A'))
+                
+                # 如果有平倉信息，追加到最新記錄
+                if closing_info:
+                    # 追加平倉信息到文件末尾
+                    with open(self.log_filename, 'a', encoding='utf-8') as f:
+                        f.write(f"平倉時間: {closing_info.get('close_time', 'N/A')}\n")
+                        f.write(f"平倉價格: {closing_info.get('close_price', 'N/A')}\n")
+                        if 'pnl' in closing_info:
+                            f.write(f"損益: {closing_info['pnl']}\n")
+                        f.write("-" * 80 + "\n\n")
+                    
+                    print(f"📝 平倉信息已更新到: {self.log_filename}")
+                    log.info(f"平倉信息已更新到日誌文件")
+                else:
+                    # 創建新的成交記錄
+                    log_entry = []
+                    log_entry.append("-" * 80)
+                    log_entry.append(f"成交時間: {timestamp}")
+                    log_entry.append(f"持倉方向: {position_side}")
+                    log_entry.append(f"持倉數量: {abs(position_size)}")
+                    log_entry.append(f"開倉價格: {entry_price}")
+                    
+                    if market_price:
+                        log_entry.append(f"市場價格: {market_price}")
+                    
+                    # 記錄訂單簿深度（詳細檔位）
+                    if detailed_orderbook:
+                        log_entry.append(f"訂單簿深度 (範圍: ±{ORDERBOOK_PRICE_RANGE_BPS}bps):")
+                        log_entry.append(f"  總買盤: {detailed_orderbook['total_bid']:.4f}")
+                        log_entry.append(f"  總賣盤: {detailed_orderbook['total_ask']:.4f}")
+                        log_entry.append(f"  總深度: {detailed_orderbook['total_depth']:.4f}")
+                        log_entry.append("")
+                        
+                        # 記錄買盤檔位（從高到低）
+                        if detailed_orderbook['bid_levels']:
+                            log_entry.append("  買盤檔位:")
+                            for price, volume in detailed_orderbook['bid_levels']:
+                                price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
+                                log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
+                        else:
+                            log_entry.append("  買盤檔位: 無")
+                        
+                        log_entry.append("")
+                        
+                        # 記錄賣盤檔位（從低到高）
+                        if detailed_orderbook['ask_levels']:
+                            log_entry.append("  賣盤檔位:")
+                            for price, volume in detailed_orderbook['ask_levels']:
+                                price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
+                                log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
+                        else:
+                            log_entry.append("  賣盤檔位: 無")
+                    elif orderbook_depth and orderbook_depth[0] is not None:
+                        # 兼容舊格式
+                        bid_vol, ask_vol, total_vol = orderbook_depth
+                        log_entry.append(f"訂單簿深度 (範圍: ±{ORDERBOOK_PRICE_RANGE_BPS}bps):")
+                        log_entry.append(f"  買盤總量: {bid_vol:.4f}")
+                        log_entry.append(f"  賣盤總量: {ask_vol:.4f}")
+                        log_entry.append(f"  總深度: {total_vol:.4f}")
+                    else:
+                        log_entry.append(f"訂單簿深度: 數據未就緒")
+                    
+                    # 記錄波動率
+                    if short_term_volatility is not None:
+                        log_entry.append(f"10秒波動率: {short_term_volatility*100:.4f}%")
+                    else:
+                        log_entry.append(f"10秒波動率: 數據未就緒")
+                    
+                    if mid_term_volatility is not None:
+                        log_entry.append(f"20秒波動率: {mid_term_volatility*100:.4f}%")
+                    else:
+                        log_entry.append(f"20秒波動率: 數據未就緒")
+                    
+                    log_entry.append("-" * 80)
+                    log_entry.append("")
+                    
+                    # 寫入文件
+                    with open(self.log_filename, 'a', encoding='utf-8') as f:
+                        f.write('\n'.join(log_entry) + '\n')
+                    
+                    # 同時輸出到控制台
+                    print(f"📝 成交記錄已寫入: {self.log_filename}")
+                    log.info(f"成交記錄已寫入日誌文件: {position_side} {abs(position_size)} @ {entry_price}")
+                
+        except Exception as e:
+            log.error(f"記錄成交日誌失敗: {e}")
+            print(f"⚠️ 記錄成交日誌時發生錯誤: {e}")
 
 # ==========================================
 # 🤖 交易機器人核心
@@ -310,8 +542,6 @@ class TradingBot:
         self.auth_token = auth_token
         
         # 處理私鑰格式
-        if signing_key_hex.startswith("0x"):
-            signing_key_hex = signing_key_hex[2:]
         self.signer = SigningKey(signing_key_hex, encoder=HexEncoder)
         
         # HTTP 會話
@@ -572,36 +802,39 @@ def execute_trading_strategy():
     global trading_bot, is_shutting_down
     
     # 驗證配置
-    if not AUTH_TOKEN:
-        print("❌ 請在 .env 文件中設置 JWT_TOKEN！")
-        log.error("JWT_TOKEN 未配置")
+    if not API_KEY:
+        print("❌ 請在 .env 文件中設置 API_KEY！")
+        log.error("API_KEY 未配置")
         return
 
-    # 處理私鑰（僅使用 d 值）
-    if not D_VALUE_B64:
-        print("❌ 請在 .env 文件中設置 D_VALUE_BASE64！")
+    # 處理私鑰
+    if not SIGNING_KEY:
+        print("❌ 請在 .env 文件中設置 SIGNING_KEY！")
         log.error("私鑰配置缺失")
         return
     
-    print("🔑 偵測到 d 值，正在轉換...")
-    log.info("開始轉換 Base64 私鑰")
-    final_private_key = decode_base64_private_key(D_VALUE_B64)
+    print("🔑 偵測到簽名密鑰，正在轉換...")
+    log.info("開始轉換 Base58 私鑰")
+    final_private_key = decode_base58_private_key(SIGNING_KEY)
     if not final_private_key:
-        print("❌ d 值轉換失敗，請檢查格式！")
-        log.error("Base64 私鑰轉換失敗")
+        print("❌ 簽名密鑰轉換失敗，請檢查格式！")
+        log.error("Base58 私鑰轉換失敗")
         return
-    print("✅ d 值轉換成功！")
-    log.info("Base64 私鑰轉換完成")
+    print("✅ 簽名密鑰轉換成功！")
+    log.info("Base58 私鑰轉換完成")
 
     # 註冊信號處理
     signal.signal(signal.SIGINT, handle_shutdown_signal)
     signal.signal(signal.SIGTERM, handle_shutdown_signal)
     
     # 初始化機器人
-    trading_bot = TradingBot(AUTH_TOKEN, final_private_key)
+    trading_bot = TradingBot(API_KEY, final_private_key)
     
-    print("🚀 盜用狗會破產，我說真的 (優化安全版)...")
+    # 初始化成交記錄器
+    trade_logger = TradeLogger("trades.log")
+    
     print("💡 提示: 按 Ctrl+C 可安全退出（會自動撤單和平倉）")
+    print("📝 成交記錄將保存到: trades.log")
     time.sleep(2)
     
     # 冷靜期管理
@@ -648,6 +881,44 @@ def execute_trading_strategy():
                 print(f"🚨🚨🚨 完蛋啦！吃到單 qty={position_size}，平倉閃人中！ 🚨🚨🚨")
                 log.warning(f"檢測到持倉: {position_size}")
                 
+                # 獲取當前市場價格用於記錄
+                current_market_price = trading_bot.market_stream.fetch_current_price()
+                if current_market_price is None:
+                    current_market_price = trading_bot.fetch_backup_price()
+                
+                # 獲取詳細訂單簿深度（每個價格檔位）
+                detailed_orderbook = None
+                if current_market_price:
+                    detailed_orderbook = trading_bot.market_stream.get_detailed_orderbook_depth(current_market_price)
+                
+                # 計算波動率（使用歷史價格數據）
+                short_term_vol = None
+                mid_term_vol = None
+                if current_market_price and historical_prices:
+                    current_ts = time.time()
+                    # 20秒波動
+                    if historical_prices:
+                        oldest_price = historical_prices[0][1]
+                        mid_term_vol = abs(current_market_price - oldest_price) / oldest_price
+                    
+                    # 10秒波動
+                    cutoff_time = current_ts - 10
+                    base_price = current_market_price
+                    for timestamp, price in historical_prices:
+                        if timestamp >= cutoff_time:
+                            base_price = price
+                            break
+                    short_term_vol = abs(current_market_price - base_price) / base_price
+                
+                # 記錄成交信息（包含詳細訂單簿深度和波動率）
+                trade_logger.log_trade(
+                    current_position, 
+                    market_price=current_market_price,
+                    detailed_orderbook=detailed_orderbook,
+                    short_term_volatility=short_term_vol,
+                    mid_term_volatility=mid_term_vol
+                )
+                
                 # 並行撤單
                 active_orders = trading_bot.query_active_orders()
                 log.info(f"撤銷 {len(active_orders)} 個訂單")
@@ -691,6 +962,22 @@ def execute_trading_strategy():
                         else:
                             print("✅ 平倉成功！")
                             log.info("平倉完成")
+                            
+                            # 獲取平倉時的市場價格
+                            close_market_price = trading_bot.market_stream.fetch_current_price()
+                            if close_market_price is None:
+                                close_market_price = trading_bot.fetch_backup_price()
+                            
+                            # 記錄平倉信息
+                            close_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            close_price = close_market_price if close_market_price else 'N/A'
+                            closing_info = {
+                                'close_time': close_time,
+                                'close_price': close_price
+                            }
+                            # 更新日誌，添加平倉信息
+                            trade_logger.log_trade(current_position, market_price=close_market_price, closing_info=closing_info)
+                            
                             break
                     except Exception as err:
                         log.error(f"平倉重試 {retry_attempt+1} 錯誤: {err}")

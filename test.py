@@ -1,123 +1,88 @@
 import websocket
 import json
 import time
-from datetime import datetime
-import os
+import threading
 
 # ==========================================
-# ⚙️ 設定區
+# 🔑 請填入 Token
 # ==========================================
+JWT_TOKEN = "eyJhbGciOiJFUzI1NiIsImtpZCI6IlhnaEJQSVNuN0RQVHlMcWJtLUVHVkVhOU1lMFpwdU9iMk1Qc2gtbUFlencifQ.eyJhIjoiMHhGZWMzNWFGNDk2ZGEyMEUwZThlMTBjNEMyQjdiODQ0Yzk4OTkwOUJlIiwiYyI6ImJzYyIsIm4iOiJrS3VHcXhGUGdBdGxBSTZobCIsImkiOiIyMDI2LTAxLTE1VDAyOjI4OjI0LjYyMloiLCJzIjoiT1VVWTJRaUJ6UjJQcVlWazVOMzJQK1crWHZCWUtDMGpCRkN1Zmt2NVlWazBPVC9pZitMdGNTejdNMjV6VDNXaE9aODlBWmN0bEp3bG5vL3o1OEx4bnhzPSIsInIiOiJCWXd4dkFZbWRTVEdNVVE3NU5wbWRpb2Iyajl0VXdNQ3RtOWFZakI2OFE3RyIsInciOjIsImlhdCI6MTc2ODQ0NDExNywiZXhwIjoxNzY5MDQ4OTE3fQ.jSQPPbwQ86YlXkVxdX30fYv0UBM8TdBrLPXgpzx087YEhQ9qdiqJF2cgeAROrodFhV1tvPDNbryZVKxUyc4HOg"
+
 WS_URL = "wss://perps.standx.com/ws-stream/v1"
-SYMBOL = "BTC-USD"
-CHANNEL = "depth_book" 
 
-# 🔥 設定你想看幾檔？ (建議 10~30，太多畫面會塞不下)
-DISPLAY_LIMIT = 20 
-
-class DeepBookMonitor:
-    def __init__(self):
-        self.ws_url = WS_URL
-        self.bids = [] 
-        self.asks = [] 
-
-    def _on_open(self, ws):
-        print(f"✅ 連線成功！正在訂閱深度: {CHANNEL}...")
-        msg = {
-            "subscribe": {
-                "channel": CHANNEL,
-                "symbol": SYMBOL
-            }
+def on_open(ws):
+    print("✅ WebSocket 連線成功！")
+    
+    # 步驟 1: 先發送 Auth (確保身份驗證)
+    # 我們只放 position，因為這是我們確定有效的
+    auth_payload = {
+        "auth": {
+            "token": JWT_TOKEN,
+            "streams": [{"channel": "position"}] 
         }
-        ws.send(json.dumps(msg))
+    }
+    ws.send(json.dumps(auth_payload))
+    print("🔐 1. Auth 請求已發送...")
 
-    def _on_message(self, ws, message):
-        try:
-            raw = json.loads(message)
+    # 步驟 2: 發送獨立的 Balance 訂閱 (根據官方文件)
+    # 稍微停頓一下確保 Auth 先被處理 (雖然通常可以用 Pipeline，但安全起見)
+    time.sleep(0.5) 
+    
+    sub_payload = {
+        "subscribe": {
+            "channel": "balance"
+        }
+    }
+    ws.send(json.dumps(sub_payload))
+    print("📨 2. Balance 訂閱請求已發送！")
+    print("=" * 60)
+
+def on_message(ws, message):
+    try:
+        raw = json.loads(message)
+        channel = raw.get("channel")
+
+        # 顯示驗證結果
+        if channel == "auth":
+            print(f"🔑 驗證回應: {raw}")
+            return
+
+        # 顯示任何收到的數據
+        if channel == "balance":
+            print(f"\n🎉🎉🎉 成功抓到餘額了！ 🎉🎉🎉")
+            print(json.dumps(raw, indent=2))
             
-            if raw.get("channel") == CHANNEL and "data" in raw:
-                data = raw["data"]
-                
-                if "bids" in data: self.bids = data["bids"]
-                if "asks" in data: self.asks = data["asks"]
-                
-                self.display_book()
-
-        except Exception as e:
-            # 忽略一些非 JSON 的雜訊
-            pass
-
-    def display_book(self):
-        # 清除終端機畫面
-        os.system('cls' if os.name == 'nt' else 'clear')
-        
-        # 1. 檢查我們到底收到了多少數據
-        total_bids = len(self.bids)
-        total_asks = len(self.asks)
-        
-        print(f"=== 🌊 StandX 深海探測雷達 ({datetime.now().strftime('%H:%M:%S')}) ===")
-        print(f"📡 伺服器回傳總深度: 買單 {total_bids} 檔 | 賣單 {total_asks} 檔")
-        print(f"👀 目前顯示範圍: 前 {DISPLAY_LIMIT} 檔")
-        print("=" * 60)
-
-        # 2. 顯示賣單 (Asks) - 倒序顯示 (價格高的在上面，價格低的在下面接近中價)
-        print(f"{'賣方 (Sell)':<10} | {'價格 (Price)':<12} | {'數量 (Qty)':<10} | {'累計 (Total)'}")
-        print("-" * 60)
-        
-        # 截取我們要看的範圍
-        show_asks = self.asks[:DISPLAY_LIMIT]
-        # 因為賣單要「價格低 -> 高」排列，但在終端機顯示時，我們希望「價格高」在上面
-        # 所以要反轉列表，讓最優賣價 (賣一) 在最下面，緊貼著買單
-        show_asks = show_asks[::-1] 
-        
-        cumulative_qty = sum(float(x[1]) for x in self.asks[:DISPLAY_LIMIT]) # 這是為了算倒序累計，簡化處理我們先不算反向累計，直接顯示單層
-
-        # 為了讓累計看起來正確，我們應該從「賣一」往上算
-        # 這裡做一個小技巧：先算好每一檔的累計，再反轉顯示
-        ask_data_with_cum = []
-        cum = 0
-        for p, q in self.asks[:DISPLAY_LIMIT]:
-            cum += float(q)
-            ask_data_with_cum.append((float(p), float(q), cum))
-        
-        # 反轉準備顯示
-        for p, q, c in ask_data_with_cum[::-1]:
-            whale = "🚨大戶" if q > 2.0 else "  "  # 設定 > 2 顆 BTC 為大戶
-            print(f"{whale:<10} | {p:,.2f}     | {q:.4f}     | {c:.4f}")
-
-        # 3. 顯示價差 (Spread)
-        if self.bids and self.asks:
-            best_bid = float(self.bids[0][0])
-            best_ask = float(self.asks[0][0])
-            spread = best_ask - best_bid
-            mid = (best_bid + best_ask) / 2
-            print(f"{' ' * 24}⚡ 價差: {spread:.2f} | 中價: {mid:,.2f}")
-
-        print("-" * 60)
-
-        # 4. 顯示買單 (Bids) - 正序顯示 (價格高的在上面，價格低的在下面)
-        print(f"{'買方 (Buy)':<10} | {'價格 (Price)':<12} | {'數量 (Qty)':<10} | {'累計 (Total)'}")
-        
-        cum = 0
-        for p, q in self.bids[:DISPLAY_LIMIT]:
-            p = float(p)
-            q = float(q)
-            cum += q
-            whale = "🚨大戶" if q > 2.0 else "  "
-            print(f"{whale:<10} | {p:,.2f}     | {q:.4f}     | {cum:.4f}")
+            # 解析並顯示關鍵數據
+            data = raw.get("data", {})
+            free = float(data.get("free", 0))
+            total = float(data.get("total", 0))
+            print(f"\n💰 可用餘額 (Free): {free:,.2f} DUSD")
+            print(f"💰 總權益 (Total): {total:,.2f} DUSD")
+            print("=" * 60)
             
-        print("=" * 60)
+        elif channel == "position":
+            print(f"📦 收到 Position 更新")
+            
+        else:
+            # 顯示其他雜訊 (如果是錯誤訊息)
+            if "code" in raw and raw["code"] != 0:
+                print(f"❌ 錯誤: {raw}")
 
-    def run(self):
-        ws = websocket.WebSocketApp(
-            self.ws_url,
-            on_open=self._on_open,
-            on_message=self._on_message
-        )
-        ws.run_forever()
+    except Exception as e:
+        print(f"Error: {e}")
+
+def on_error(ws, error):
+    print(f"⚠️ 錯誤: {error}")
+
+def on_close(ws, status, msg):
+    print("❌ 連線關閉")
 
 if __name__ == "__main__":
-    monitor = DeepBookMonitor()
-    try:
-        monitor.run()
-    except KeyboardInterrupt:
-        print("程式結束")
+    ws = websocket.WebSocketApp(
+        WS_URL,
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close
+    )
+    ws.run_forever()
