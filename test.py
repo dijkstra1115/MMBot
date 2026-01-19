@@ -1,88 +1,133 @@
-import websocket
-import json
+import os
 import time
-import threading
+import uuid
+import json
+import base64
+import requests
+import base58
+from nacl.signing import SigningKey
+from nacl.encoding import HexEncoder
+from dotenv import load_dotenv
+
+# 載入 .env 設定
+load_dotenv()
 
 # ==========================================
-# 🔑 請填入 Token
+# ⚙️ 設定區
 # ==========================================
-JWT_TOKEN = "eyJhbGciOiJFUzI1NiIsImtpZCI6IlhnaEJQSVNuN0RQVHlMcWJtLUVHVkVhOU1lMFpwdU9iMk1Qc2gtbUFlencifQ.eyJhIjoiMHhGZWMzNWFGNDk2ZGEyMEUwZThlMTBjNEMyQjdiODQ0Yzk4OTkwOUJlIiwiYyI6ImJzYyIsIm4iOiJrS3VHcXhGUGdBdGxBSTZobCIsImkiOiIyMDI2LTAxLTE1VDAyOjI4OjI0LjYyMloiLCJzIjoiT1VVWTJRaUJ6UjJQcVlWazVOMzJQK1crWHZCWUtDMGpCRkN1Zmt2NVlWazBPVC9pZitMdGNTejdNMjV6VDNXaE9aODlBWmN0bEp3bG5vL3o1OEx4bnhzPSIsInIiOiJCWXd4dkFZbWRTVEdNVVE3NU5wbWRpb2Iyajl0VXdNQ3RtOWFZakI2OFE3RyIsInciOjIsImlhdCI6MTc2ODQ0NDExNywiZXhwIjoxNzY5MDQ4OTE3fQ.jSQPPbwQ86YlXkVxdX30fYv0UBM8TdBrLPXgpzx087YEhQ9qdiqJF2cgeAROrodFhV1tvPDNbryZVKxUyc4HOg"
+API_BASE_URL = "https://perps.standx.com"
+API_KEY = os.getenv("API_KEY")  # 注意：你的 .env 變數名目前是用這個存 Token/API Key
+PRIVATE_KEY_RAW = os.getenv("SIGNING_KEY")
 
-WS_URL = "wss://perps.standx.com/ws-stream/v1"
-
-def on_open(ws):
-    print("✅ WebSocket 連線成功！")
-    
-    # 步驟 1: 先發送 Auth (確保身份驗證)
-    # 我們只放 position，因為這是我們確定有效的
-    auth_payload = {
-        "auth": {
-            "token": JWT_TOKEN,
-            "streams": [{"channel": "position"}] 
-        }
-    }
-    ws.send(json.dumps(auth_payload))
-    print("🔐 1. Auth 請求已發送...")
-
-    # 步驟 2: 發送獨立的 Balance 訂閱 (根據官方文件)
-    # 稍微停頓一下確保 Auth 先被處理 (雖然通常可以用 Pipeline，但安全起見)
-    time.sleep(0.5) 
-    
-    sub_payload = {
-        "subscribe": {
-            "channel": "balance"
-        }
-    }
-    ws.send(json.dumps(sub_payload))
-    print("📨 2. Balance 訂閱請求已發送！")
-    print("=" * 60)
-
-def on_message(ws, message):
+# ==========================================
+# 🔐 輔助函式
+# ==========================================
+def decode_private_key(key_string):
+    """解碼私鑰 (支援 Base58/Base64/Hex)"""
     try:
-        raw = json.loads(message)
-        channel = raw.get("channel")
+        key_string = key_string.strip()
+        # 嘗試 Base58
+        try:
+            decoded = base58.b58decode(key_string)
+            if len(decoded) == 32: return decoded.hex()
+        except: pass
+        # 嘗試 Base64
+        try:
+            pad = len(key_string) % 4
+            if pad: key_string += '=' * (4 - pad)
+            decoded = base64.urlsafe_b64decode(key_string)
+            if len(decoded) == 32: return decoded.hex()
+        except: pass
+        # 嘗試 Hex
+        if key_string.startswith("0x"): key_string = key_string[2:]
+        return key_string
+    except: return None
 
-        # 顯示驗證結果
-        if channel == "auth":
-            print(f"🔑 驗證回應: {raw}")
-            return
+# ==========================================
+# 🚀 主程式
+# ==========================================
+def main():
+    print("🔍 正在檢查環境變數...")
+    
+    if not API_KEY:
+        print("❌ 錯誤: 找不到 STANDX_JWT_TOKEN (API Key)")
+        return
+    if not PRIVATE_KEY_RAW:
+        print("❌ 錯誤: 找不到 STANDX_PRIVATE_KEY")
+        return
 
-        # 顯示任何收到的數據
-        if channel == "balance":
-            print(f"\n🎉🎉🎉 成功抓到餘額了！ 🎉🎉🎉")
-            print(json.dumps(raw, indent=2))
+    # 1. 準備私鑰
+    priv_hex = decode_private_key(PRIVATE_KEY_RAW)
+    if not priv_hex:
+        print("❌ 私鑰格式錯誤")
+        return
+    signer = SigningKey(priv_hex, encoder=HexEncoder)
+    print("✅ 私鑰載入成功")
+
+    # 2. 準備請求數據
+    timestamp = int(time.time() * 1000)
+    # 這是 StandX 查詢餘額的標準路徑
+    path = "/api/query_balance" 
+    params = f"t={timestamp}"
+    full_url = f"{API_BASE_URL}{path}?{params}"
+
+    # 3. 產生簽名 (GET 請求 payload 通常為空字串)
+    payload_to_sign = "" 
+    
+    protocol_version = "v1"
+    request_uuid = str(uuid.uuid4())
+    
+    # 簽名訊息格式: v1,uuid,timestamp,payload
+    sig_msg = f"{protocol_version},{request_uuid},{timestamp},{payload_to_sign}"
+    signed = signer.sign(sig_msg.encode('utf-8'))
+    signature = base64.b64encode(signed.signature).decode('utf-8')
+
+    # 4. 建構 Headers (模擬 API Key 模式)
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {API_KEY}", # 如果是 JWT 模式
+        # 如果是純 API Key 模式，可能需要: "X-API-KEY": API_KEY
+        
+        # 簽名 Headers
+        "x-request-sign-version": protocol_version,
+        "x-request-id": request_uuid,
+        "x-request-timestamp": str(timestamp),
+        "x-request-signature": signature
+    }
+
+    print(f"\n📡 正在發送請求到: {full_url}")
+    print(f"🔑 使用 Token 前10碼: {API_KEY[:10]}...")
+
+    try:
+        response = requests.get(full_url, headers=headers, timeout=5)
+        print(f"📩 HTTP 狀態碼: {response.status_code}")
+        
+        try:
+            data = response.json()
+            print("\n🎉 API 回傳內容:")
+            print(json.dumps(data, indent=2))
             
-            # 解析並顯示關鍵數據
-            data = raw.get("data", {})
-            free = float(data.get("free", 0))
-            total = float(data.get("total", 0))
-            print(f"\n💰 可用餘額 (Free): {free:,.2f} DUSD")
-            print(f"💰 總權益 (Total): {total:,.2f} DUSD")
-            print("=" * 60)
-            
-        elif channel == "position":
-            print(f"📦 收到 Position 更新")
-            
-        else:
-            # 顯示其他雜訊 (如果是錯誤訊息)
-            if "code" in raw and raw["code"] != 0:
-                print(f"❌ 錯誤: {raw}")
+            # 嘗試解析餘額
+            balance_info = None
+            if 'free' in data: 
+                balance_info = data
+            elif 'data' in data and 'free' in data['data']:
+                balance_info = data['data']
+            elif 'result' in data and 'free' in data['result']:
+                balance_info = data['result']
+                
+            if balance_info:
+                print("\n💰 解析結果:")
+                print(f"   可用餘額 (Free): {float(balance_info.get('free', 0)):,.2f}")
+                print(f"   總權益 (Total): {float(balance_info.get('total', 0)):,.2f}")
+            else:
+                print("\n⚠️ 未找到餘額欄位，請確認回傳格式")
+                
+        except json.JSONDecodeError:
+            print("❌ 回傳不是 JSON:", response.text)
 
     except Exception as e:
-        print(f"Error: {e}")
-
-def on_error(ws, error):
-    print(f"⚠️ 錯誤: {error}")
-
-def on_close(ws, status, msg):
-    print("❌ 連線關閉")
+        print(f"❌ 請求失敗: {e}")
 
 if __name__ == "__main__":
-    ws = websocket.WebSocketApp(
-        WS_URL,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close
-    )
-    ws.run_forever()
+    main()

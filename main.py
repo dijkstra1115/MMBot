@@ -64,6 +64,10 @@ ORDERBOOK_PRICE_RANGE_BPS = 20  # 計算 OBI 的價格範圍（基點）
 LOOP_INTERVAL = 0.2  # 主循環間隔時間（秒）
 PRICE_HISTORY_SIZE = 200  # 價格歷史記錄緩衝區大小
 
+# 資金管理參數
+MIN_BALANCE_THRESHOLD = 1130  # 最低餘額閾值（DUSD），低於此值將暫停程式
+BALANCE_CHECK_INTERVAL = 30  # 餘額檢查間隔（秒）
+
 # 全域狀態變數
 is_shutting_down = False
 trading_bot = None
@@ -531,6 +535,101 @@ class TradeLogger:
         except Exception as e:
             log.error(f"記錄成交日誌失敗: {e}")
             print(f"⚠️ 記錄成交日誌時發生錯誤: {e}")
+    
+    def log_risk_trigger(self, trigger_type, market_price, orderbook_imbalance=None, 
+                        short_term_volatility=None, mid_term_volatility=None, 
+                        current_spread=None, detailed_orderbook=None):
+        """
+        記錄風控觸發事件（OBI 或波動率觸發）
+        
+        Args:
+            trigger_type: 觸發類型 ('OBI' 或 'VOLATILITY_SHORT_TERM')
+            market_price: 當前市場價格
+            orderbook_imbalance: OBI 指標值（-1 到 1）
+            short_term_volatility: 10秒波動率（百分比）
+            mid_term_volatility: 20秒波動率（百分比）
+            current_spread: 當前價差（基點）
+            detailed_orderbook: 詳細訂單簿數據字典
+        """
+        try:
+            with self.log_lock:
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                log_entry = []
+                log_entry.append("-" * 80)
+                log_entry.append(f"風控觸發時間: {timestamp}")
+                log_entry.append(f"觸發類型: {trigger_type}")
+                log_entry.append(f"市場價格: {market_price:,.2f}")
+                
+                # 記錄 OBI 數據
+                if orderbook_imbalance is not None:
+                    imbalance_pct = orderbook_imbalance * 100
+                    imbalance_label = "買盤多" if orderbook_imbalance > 0 else "賣盤多" if orderbook_imbalance < 0 else "平衡"
+                    log_entry.append(f"OBI指標: {imbalance_pct:.2f}% ({imbalance_label}, 閾值{ORDERBOOK_IMBALANCE_LIMIT*100:.0f}%)")
+                else:
+                    log_entry.append("OBI指標: 數據未就緒")
+                
+                # 記錄波動率
+                if short_term_volatility is not None:
+                    log_entry.append(f"10秒波動率: {short_term_volatility*100:.4f}% (閾值{VOLATILITY_SHORT_TERM_PCT*100:.4f}%)")
+                else:
+                    log_entry.append("10秒波動率: 數據未就緒")
+                
+                if mid_term_volatility is not None:
+                    log_entry.append(f"20秒波動率: {mid_term_volatility*100:.4f}% (閾值{VOLATILITY_MID_TERM_PCT*100:.4f}%)")
+                else:
+                    log_entry.append("20秒波動率: 數據未就緒")
+                
+                # 記錄價差
+                if current_spread is not None:
+                    log_entry.append(f"當前價差: {current_spread:.2f} bps")
+                else:
+                    log_entry.append("當前價差: 數據未就緒")
+                
+                # 記錄訂單簿深度
+                if detailed_orderbook:
+                    log_entry.append(f"訂單簿深度 (範圍: ±{ORDERBOOK_PRICE_RANGE_BPS}bps):")
+                    log_entry.append(f"  總買盤: {detailed_orderbook['total_bid']:.4f}")
+                    log_entry.append(f"  總賣盤: {detailed_orderbook['total_ask']:.4f}")
+                    log_entry.append(f"  總深度: {detailed_orderbook['total_depth']:.4f}")
+                    log_entry.append("")
+                    
+                    # 記錄買盤檔位（從高到低）
+                    if detailed_orderbook['bid_levels']:
+                        log_entry.append("  買盤檔位:")
+                        for price, volume in detailed_orderbook['bid_levels']:
+                            price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
+                            log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
+                    else:
+                        log_entry.append("  買盤檔位: 無")
+                    
+                    log_entry.append("")
+                    
+                    # 記錄賣盤檔位（從低到高）
+                    if detailed_orderbook['ask_levels']:
+                        log_entry.append("  賣盤檔位:")
+                        for price, volume in detailed_orderbook['ask_levels']:
+                            price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
+                            log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
+                    else:
+                        log_entry.append("  賣盤檔位: 無")
+                else:
+                    log_entry.append("訂單簿深度: 數據未就緒")
+                
+                log_entry.append("-" * 80)
+                log_entry.append("")
+                
+                # 寫入文件
+                with open(self.log_filename, 'a', encoding='utf-8') as f:
+                    f.write('\n'.join(log_entry) + '\n')
+                
+                # 同時輸出到控制台
+                print(f"📝 風控觸發記錄已寫入: {self.log_filename}")
+                log.info(f"風控觸發記錄已寫入日誌文件: {trigger_type}")
+                
+        except Exception as e:
+            log.error(f"記錄風控觸發日誌失敗: {e}")
+            print(f"⚠️ 記錄風控觸發日誌時發生錯誤: {e}")
 
 # ==========================================
 # 🤖 交易機器人核心
@@ -627,6 +726,47 @@ class TradingBot:
             log.warning("持倉查詢超時")
         except Exception as err:
             log.error(f"持倉查詢失敗: {err}")
+        return None
+
+    def query_account_balance(self):
+        """
+        查詢帳戶餘額（通過 REST API）
+        返回: {'free': float, 'total': float} 或 None
+        
+        注意: WebSocket balance 頻道只有在餘額變動時才會推送數據，
+              因此使用 REST API 查詢更可靠
+              
+        API 返回格式:
+        {
+          "balance": "1160.032465843",
+          "cross_available": "1160.032465843",  # 可用餘額
+          "equity": "1160.032465843",           # 總權益
+          "cross_margin": "0",
+          ...
+        }
+        """
+        try:
+            query_timestamp = int(time.time() * 1000)
+            response = self.http_session.get(
+                f"{self.api_url}/api/query_balance?t={query_timestamp}",
+                timeout=2
+            )
+            result = response.json()
+            
+            # 處理 StandX API 實際返回的格式
+            if isinstance(result, dict) and 'cross_available' in result and 'equity' in result:
+                return {
+                    'free': float(result.get('cross_available', 0)),
+                    'total': float(result.get('equity', 0))
+                }
+                
+            log.warning(f"餘額查詢返回異常格式: {result}")
+            return None
+            
+        except requests.exceptions.Timeout:
+            log.warning("餘額查詢超時")
+        except Exception as err:
+            log.error(f"餘額查詢失敗: {err}")
         return None
 
     def submit_limit_order(self, order_side, order_price):
@@ -794,6 +934,45 @@ def handle_shutdown_signal(signal_number, stack_frame):
     print("👋 程式已安全退出")
     sys.exit(0)
 
+def check_balance_and_shutdown(bot_instance):
+    """
+    檢查帳戶餘額，如果低於閾值則執行緊急關閉
+    返回: True 表示需要關閉程式, False 表示餘額充足
+    """
+    try:
+        balance = bot_instance.query_account_balance()
+        
+        if balance is None:
+            log.warning("無法獲取帳戶餘額，跳過本次檢查")
+            return False
+        
+        free_balance = balance['free']
+        total_balance = balance['total']
+        
+        # 檢查餘額是否低於閾值
+        if total_balance < MIN_BALANCE_THRESHOLD:
+            print("\n" + "="*50)
+            print(f"⚠️ 餘額不足警告！")
+            print(f"💰 可用餘額: {free_balance:.2f} DUSD")
+            print(f"💰 總權益: {total_balance:.2f} DUSD")
+            print(f"📉 低於最低閾值: {MIN_BALANCE_THRESHOLD:.2f} DUSD")
+            print("🚨 執行緊急關閉程序...")
+            print("="*50)
+            log.critical(f"餘額不足: {free_balance:.2f} < {MIN_BALANCE_THRESHOLD:.2f}")
+            
+            # 執行緊急關閉
+            perform_emergency_shutdown(bot_instance)
+            
+            return True
+        
+        # 餘額充足，記錄日誌但不打印到控制台（避免干擾界面）
+        log.debug(f"餘額檢查通過: 可用 {free_balance:.2f} DUSD, 總權益 {total_balance:.2f} DUSD")
+        return False
+        
+    except Exception as err:
+        log.error(f"餘額檢查失敗: {err}")
+        return False
+
 # ==========================================
 # 🎯 主策略執行邏輯
 # ==========================================
@@ -835,11 +1014,15 @@ def execute_trading_strategy():
     
     print("💡 提示: 按 Ctrl+C 可安全退出（會自動撤單和平倉）")
     print("📝 成交記錄將保存到: trades.log")
+    print(f"💰 最低餘額閾值: {MIN_BALANCE_THRESHOLD:.2f} DUSD (每 {BALANCE_CHECK_INTERVAL} 秒檢查一次)")
     time.sleep(2)
     
     # 冷靜期管理
     volatility_resume_at = datetime.min
     position_resume_at = datetime.min
+    
+    # 餘額檢查管理
+    last_balance_check = 0.0  # 上次檢查餘額的時間戳
     
     # 價格歷史記錄
     historical_prices = deque(maxlen=PRICE_HISTORY_SIZE)
@@ -851,6 +1034,17 @@ def execute_trading_strategy():
             if is_shutting_down:
                 log.info("偵測到關閉信號，退出主循環")
                 break
+            
+            # 定期檢查餘額
+            current_time = time.time()
+            if current_time - last_balance_check >= BALANCE_CHECK_INTERVAL:
+                log.info("執行定期餘額檢查...")
+                if check_balance_and_shutdown(trading_bot):
+                    # 餘額不足，程式已執行緊急關閉
+                    print("\n💔 因餘額不足，程式已停止運行")
+                    log.critical("因餘額不足而停止程式")
+                    break
+                last_balance_check = current_time
             
             action_messages = []
             
@@ -1061,9 +1255,11 @@ def execute_trading_strategy():
             market_is_dangerous = False
             danger_reason = ""
             pause_duration = MARKET_PAUSE_DURATION
+            trigger_type = None
 
             if orderbook_imbalance is not None and imbalance_magnitude > ORDERBOOK_IMBALANCE_LIMIT:
                 market_is_dangerous = True
+                trigger_type = "OBI"
                 danger_reason = f"OBI不平衡 ({orderbook_imbalance*100:.1f}%, 閾值{ORDERBOOK_IMBALANCE_LIMIT*100:.0f}%)"
                 pause_duration = ORDERBOOK_PAUSE_DURATION
             elif current_spread > SPREAD_DANGER_THRESHOLD:
@@ -1071,6 +1267,7 @@ def execute_trading_strategy():
                 danger_reason = f"Spread價差過大 ({current_spread:.1f}bps)"
             elif short_term_volatility > VOLATILITY_SHORT_TERM_PCT:
                 market_is_dangerous = True
+                trigger_type = "VOLATILITY_SHORT_TERM"
                 danger_reason = f"10秒趨勢劇烈 ({short_term_volatility*100:.2f}%)"
             elif mid_term_volatility > VOLATILITY_MID_TERM_PCT:
                 market_is_dangerous = True
@@ -1083,6 +1280,22 @@ def execute_trading_strategy():
                 else:
                     print(f"🛡️ 撤銷所有訂單並暫停交易 {pause_duration//60} 分鐘...")
                 log.warning(f"觸發風控保護: {danger_reason}")
+                
+                # 記錄風控觸發數據（僅 OBI 和短期波動）
+                if trigger_type in ["OBI", "VOLATILITY_SHORT_TERM"]:
+                    # 獲取詳細訂單簿深度
+                    detailed_orderbook = trading_bot.market_stream.get_detailed_orderbook_depth(reference_price)
+                    
+                    # 記錄到日誌文件
+                    trade_logger.log_risk_trigger(
+                        trigger_type=trigger_type,
+                        market_price=reference_price,
+                        orderbook_imbalance=orderbook_imbalance,
+                        short_term_volatility=short_term_volatility,
+                        mid_term_volatility=mid_term_volatility,
+                        current_spread=current_spread if current_spread > 0 else None,
+                        detailed_orderbook=detailed_orderbook
+                    )
                 
                 # 並行撤單
                 active_orders = trading_bot.query_active_orders()
