@@ -52,6 +52,7 @@ SPREAD_MAX_BPS = 10  # 最大價差（基點），超過此值會撤單
 SPREAD_DANGER_THRESHOLD = 25  # 價差危險閾值（基點），超過會觸發風控
 VOLATILITY_SHORT_TERM_PCT = 0.001  # 10秒短期波動率上限（百分比）
 VOLATILITY_MID_TERM_PCT = 0.0015  # 20秒中期波動率上限（百分比）
+VOLATILITY_LONG_TERM_PCT = 0.002  # 30秒長期波動率上限（百分比）
 MARKET_PAUSE_DURATION = 300  # 市場波動觸發的暫停時間（秒）
 POSITION_PAUSE_DURATION = 300  # 吃單後的冷靜期時間（秒）
 
@@ -1252,27 +1253,37 @@ def execute_trading_strategy():
             current_timestamp = time.time()
             historical_prices.append((current_timestamp, reference_price))
 
-            # 清理舊數據
-            while historical_prices and historical_prices[0][0] < current_timestamp - 20:
+            # 清理舊數據（保留30秒數據）
+            while historical_prices and historical_prices[0][0] < current_timestamp - 30:
                 historical_prices.popleft()
 
             # 計算波動率
             short_term_volatility = 0.0
             mid_term_volatility = 0.0
+            long_term_volatility = 0.0
             
             if historical_prices:
-                # 20秒波動
+                # 30秒波動（使用最舊的數據）
                 oldest_price = historical_prices[0][1]
-                mid_term_volatility = abs(reference_price - oldest_price) / oldest_price
+                long_term_volatility = abs(reference_price - oldest_price) / oldest_price
+                
+                # 20秒波動
+                cutoff_20s = current_timestamp - 20
+                price_20s_ago = reference_price  # 預設為當前價格
+                for timestamp, price in historical_prices:
+                    if timestamp >= cutoff_20s:
+                        price_20s_ago = price
+                        break
+                mid_term_volatility = abs(reference_price - price_20s_ago) / price_20s_ago
                 
                 # 10秒波動
-                cutoff_time = current_timestamp - 10
-                base_price = reference_price
+                cutoff_10s = current_timestamp - 10
+                price_10s_ago = reference_price  # 預設為當前價格
                 for timestamp, price in historical_prices:
-                    if timestamp >= cutoff_time:
-                        base_price = price
+                    if timestamp >= cutoff_10s:
+                        price_10s_ago = price
                         break
-                short_term_volatility = abs(reference_price - base_price) / base_price
+                short_term_volatility = abs(reference_price - price_10s_ago) / price_10s_ago
 
             # 計算價差
             current_spread = 0.0
@@ -1308,6 +1319,9 @@ def execute_trading_strategy():
             elif mid_term_volatility > VOLATILITY_MID_TERM_PCT:
                 market_is_dangerous = True
                 danger_reason = f"20秒趨勢劇烈 ({mid_term_volatility*100:.2f}%)"
+            elif long_term_volatility > VOLATILITY_LONG_TERM_PCT:
+                market_is_dangerous = True
+                danger_reason = f"30秒趨勢劇烈 ({long_term_volatility*100:.2f}%)"
 
             if market_is_dangerous:
                 print(f"🌊 偵測到危險行情! 原因: {danger_reason}")
@@ -1467,6 +1481,7 @@ def execute_trading_strategy():
             print(f"📊 即時價格: {int(reference_price):,} ({price_source_label}) [Spread: {current_spread:.1f}bps]")
             print(f"📈 10秒波動: {short_term_volatility*100:.3f}% (限{VOLATILITY_SHORT_TERM_PCT*100}%)")
             print(f"📈 20秒波動: {mid_term_volatility*100:.3f}% (限{VOLATILITY_MID_TERM_PCT*100}%)")
+            print(f"📈 30秒波動: {long_term_volatility*100:.3f}% (限{VOLATILITY_LONG_TERM_PCT*100}%)")
             
             # OBI 顯示
             if orderbook_imbalance is not None:
