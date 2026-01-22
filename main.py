@@ -43,7 +43,7 @@ TRADING_PAIR = "BTC-USD"  # 交易對符號
 API_BASE_URL = "https://perps.standx.com"  # API 基礎網址
 
 # 做市策略配置
-ORDER_SIZE = "0.226"  # 每筆訂單大小，要注意單位是 "幣", 500u 40x槓桿大概能開 0.09 (多空都開)
+ORDER_SIZE = "0.45"  # 每筆訂單大小，要注意單位是 "幣", 500u 40x槓桿大概能開 0.09 (多空都開)
 SPREAD_TARGET_BPS = 8  # 目標價差（基點），用於計算掛單價格
 SPREAD_MIN_BPS = 7  # 最小價差（基點），低於此值會撤單
 SPREAD_MAX_BPS = 10  # 最大價差（基點），超過此值會撤單
@@ -56,8 +56,8 @@ MARKET_PAUSE_DURATION = 300  # 市場波動觸發的暫停時間（秒）
 POSITION_PAUSE_DURATION = 300  # 吃單後的冷靜期時間（秒）
 
 # OBI 訂單簿不平衡參數
-ORDERBOOK_IMBALANCE_LIMIT = 0.85  # 訂單簿不平衡閾值（0-1），超過會暫停交易
-ORDERBOOK_PAUSE_DURATION = 180  # OBI 觸發的暫停時間（秒）
+ORDERBOOK_IMBALANCE_LIMIT = 0.50  # 訂單簿不平衡閾值（0-1），超過會暫停交易
+ORDERBOOK_PAUSE_DURATION = 300  # OBI 觸發的暫停時間（秒）
 ORDERBOOK_PRICE_RANGE_BPS = 20  # 計算 OBI 的價格範圍（基點）
 
 # 系統參數
@@ -65,7 +65,7 @@ LOOP_INTERVAL = 0.2  # 主循環間隔時間（秒）
 PRICE_HISTORY_SIZE = 200  # 價格歷史記錄緩衝區大小
 
 # 資金管理參數
-MIN_BALANCE_THRESHOLD = 1130  # 最低餘額閾值（DUSD），低於此值將暫停程式
+MIN_BALANCE_THRESHOLD = 2190  # 最低餘額閾值（DUSD），低於此值將暫停程式
 BALANCE_CHECK_INTERVAL = 30  # 餘額檢查間隔（秒）
 
 # 全域狀態變數
@@ -473,33 +473,12 @@ class TradeLogger:
                     if market_price:
                         log_entry.append(f"市場價格: {market_price}")
                     
-                    # 記錄訂單簿深度（詳細檔位）
+                    # 記錄訂單簿深度（僅總量）
                     if detailed_orderbook:
                         log_entry.append(f"訂單簿深度 (範圍: ±{ORDERBOOK_PRICE_RANGE_BPS}bps):")
                         log_entry.append(f"  總買盤: {detailed_orderbook['total_bid']:.4f}")
                         log_entry.append(f"  總賣盤: {detailed_orderbook['total_ask']:.4f}")
                         log_entry.append(f"  總深度: {detailed_orderbook['total_depth']:.4f}")
-                        log_entry.append("")
-                        
-                        # 記錄買盤檔位（從高到低）
-                        if detailed_orderbook['bid_levels']:
-                            log_entry.append("  買盤檔位:")
-                            for price, volume in detailed_orderbook['bid_levels']:
-                                price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
-                                log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
-                        else:
-                            log_entry.append("  買盤檔位: 無")
-                        
-                        log_entry.append("")
-                        
-                        # 記錄賣盤檔位（從低到高）
-                        if detailed_orderbook['ask_levels']:
-                            log_entry.append("  賣盤檔位:")
-                            for price, volume in detailed_orderbook['ask_levels']:
-                                price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
-                                log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
-                        else:
-                            log_entry.append("  賣盤檔位: 無")
                     elif orderbook_depth and orderbook_depth[0] is not None:
                         # 兼容舊格式
                         bid_vol, ask_vol, total_vol = orderbook_depth
@@ -586,33 +565,12 @@ class TradeLogger:
                 else:
                     log_entry.append("當前價差: 數據未就緒")
                 
-                # 記錄訂單簿深度
+                # 記錄訂單簿深度（僅總量）
                 if detailed_orderbook:
                     log_entry.append(f"訂單簿深度 (範圍: ±{ORDERBOOK_PRICE_RANGE_BPS}bps):")
                     log_entry.append(f"  總買盤: {detailed_orderbook['total_bid']:.4f}")
                     log_entry.append(f"  總賣盤: {detailed_orderbook['total_ask']:.4f}")
                     log_entry.append(f"  總深度: {detailed_orderbook['total_depth']:.4f}")
-                    log_entry.append("")
-                    
-                    # 記錄買盤檔位（從高到低）
-                    if detailed_orderbook['bid_levels']:
-                        log_entry.append("  買盤檔位:")
-                        for price, volume in detailed_orderbook['bid_levels']:
-                            price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
-                            log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
-                    else:
-                        log_entry.append("  買盤檔位: 無")
-                    
-                    log_entry.append("")
-                    
-                    # 記錄賣盤檔位（從低到高）
-                    if detailed_orderbook['ask_levels']:
-                        log_entry.append("  賣盤檔位:")
-                        for price, volume in detailed_orderbook['ask_levels']:
-                            price_diff_bps = ((price - market_price) / market_price * 10000) if market_price else 0
-                            log_entry.append(f"    {int(price):,} ({price_diff_bps:+.1f}bps) : {volume:.4f}")
-                    else:
-                        log_entry.append("  賣盤檔位: 無")
                 else:
                     log_entry.append("訂單簿深度: 數據未就緒")
                 
@@ -834,7 +792,7 @@ class TradingBot:
         
         try:
             print(f"🔥 糟糕了有單，發送市價平倉單: {close_side} {quantity_str}")
-            log.info(f"執行平倉: {close_side} {quantity_str}")
+            log.info(f"[診斷] 開始平倉: {close_side} {quantity_str}")
             response = self.http_session.post(
                 self.api_url + api_endpoint,
                 data=payload_string,
@@ -843,13 +801,28 @@ class TradingBot:
             )
             close_result = response.json()
             print(f"   => 結果: {close_result}")
-            log.info(f"平倉回應: {close_result}")
+            log.info(f"[診斷] 平倉API回應: {close_result}")
+            
+            # [新增] 檢查API回應狀態
+            if 'code' in close_result:
+                if close_result['code'] == 0:
+                    log.info(f"[診斷] ✅ 平倉請求成功送達")
+                    return True
+                else:
+                    log.error(f"[診斷] ❌ 平倉請求被拒絕: {close_result}")
+                    return False
+            else:
+                log.warning(f"[診斷] ⚠️ 平倉回應格式異常，無法確認狀態")
+                return False
+                
         except requests.exceptions.Timeout:
-            log.error("平倉請求超時")
+            log.error("[診斷] ❌ 平倉請求超時")
             print("   => 平倉請求超時")
+            return False
         except Exception as err:
-            log.error(f"平倉執行失敗: {err}")
+            log.error(f"[診斷] ❌ 平倉失敗: {err}")
             print(f"   => 平倉請求失敗: {err}")
+            return False
 
 # ==========================================
 # 🛡️ 系統退出管理
@@ -1052,13 +1025,30 @@ def execute_trading_strategy():
             if datetime.now() < position_resume_at:
                 time_remaining = int((position_resume_at - datetime.now()).total_seconds())
                 
-                os.system('cls' if os.name == 'nt' else 'clear')
-                print("=== 🧊 吃單後冷靜期 🧊 ===")
-                print(f"⏰ 剩餘時間: {time_remaining // 60}分 {time_remaining % 60}秒")
-                print("🛡️ 暫停掛單中，等待市場穩定...")
-                print("💡 此期間不會進行任何交易")
-                time.sleep(1)
-                continue
+                # [新增] 冷靜期內也要檢查持倉！
+                log.info(f"[診斷] 吃單冷靜期中，檢查持倉狀態...")
+                position = trading_bot.query_current_position()
+                if position:
+                    raw_qty = float(position.get('qty', 0))
+                    if raw_qty != 0:
+                        log.critical(f"[診斷] ⚠️ 冷靜期內發現未平倉持倉: {raw_qty}")
+                        print(f"🚨 [診斷] 冷靜期內發現持倉 {raw_qty}，立即處理！")
+                        # 不要continue，讓程式繼續執行平倉邏輯
+                    else:
+                        log.info(f"[診斷] 冷靜期內持倉正常 (0)")
+                else:
+                    log.info(f"[診斷] 冷靜期內無持倉資料")
+                
+                # 如果沒有持倉問題，才顯示冷靜期畫面
+                if not position or float(position.get('qty', 0)) == 0:
+                    os.system('cls' if os.name == 'nt' else 'clear')
+                    print("=== 🧊 吃單後冷靜期 🧊 ===")
+                    print(f"⏰ 剩餘時間: {time_remaining // 60}分 {time_remaining % 60}秒")
+                    print("🛡️ 暫停掛單中，等待市場穩定...")
+                    print("💡 此期間不會進行任何交易")
+                    print(f"[診斷] 持倉狀態: 0 (正常)")
+                    time.sleep(1)
+                    continue
             
             # 查詢持倉狀態
             current_position = trading_bot.query_current_position()
@@ -1137,25 +1127,46 @@ def execute_trading_strategy():
                 log.info(f"平倉方向: {closing_direction}, 數量: {abs(position_size)}")
                 
                 # 重試平倉邏輯
-                for retry_attempt in range(3):
+                for retry_attempt in range(5):
                     try:
-                        trading_bot.execute_market_close(closing_direction, abs(position_size))
-                        time.sleep(1)
+                        log.info(f"[診斷] 開始第 {retry_attempt+1}/5 次平倉嘗試")
+                        close_result = trading_bot.execute_market_close(closing_direction, abs(position_size))
                         
-                        # 驗證平倉
+                        if not close_result:
+                            log.error(f"[診斷] 第 {retry_attempt+1}/5 次平倉API失敗")
+                            if retry_attempt < 4:
+                                print(f"⚠️ 平倉API失敗，重試中... ({retry_attempt+1}/5)")
+                                time.sleep(1)
+                                continue
+                        
+                        # [修改] 增加等待時間，讓交易所API有時間更新
+                        time.sleep(2)
+                        
+                        # 確認平倉（多次確認）
                         verify_position = trading_bot.query_current_position()
-                        if verify_position and float(verify_position.get('qty', 0)) != 0:
-                            log.warning(f"平倉嘗試 {retry_attempt+1}/3 未完成")
-                            if retry_attempt < 2:
-                                print(f"⚠️ 平倉未完成，重試中... ({retry_attempt+1}/3)")
+                        current_qty = float(verify_position.get('qty', 0)) if verify_position else 0
+                        log.info(f"[診斷] 第1次確認平倉後持倉: {current_qty}")
+                        
+                        # [新增] 如果持倉不為0，再等1秒後二次確認
+                        if current_qty != 0:
+                            log.warning(f"[診斷] 持倉非0，等待1秒後二次確認...")
+                            time.sleep(1)
+                            verify_position = trading_bot.query_current_position()
+                            current_qty = float(verify_position.get('qty', 0)) if verify_position else 0
+                            log.info(f"[診斷] 第2次確認平倉後持倉: {current_qty}")
+                        
+                        if verify_position and current_qty != 0:
+                            log.warning(f"[診斷] 平倉嘗試 {retry_attempt+1}/5 未完成，剩餘持倉: {current_qty}")
+                            if retry_attempt < 4:
+                                print(f"⚠️ 平倉未完成，重試中... ({retry_attempt+1}/5)")
                                 time.sleep(1)
                                 continue
                             else:
-                                print("❌ 平倉失敗，請手動處理！")
-                                log.error("平倉失敗，已達最大重試次數")
+                                print(f"❌ 平倉失敗5次，不進入冷靜期，持續嘗試！")
+                                log.critical(f"[診斷] 平倉失敗5次，剩餘持倉: {current_qty}")
                         else:
                             print("✅ 平倉成功！")
-                            log.info("平倉完成")
+                            log.info(f"[診斷] 平倉成功確認，持倉: {current_qty}")
                             
                             # 獲取平倉時的市場價格
                             close_market_price = trading_bot.market_stream.fetch_current_price()
@@ -1174,17 +1185,25 @@ def execute_trading_strategy():
                             
                             break
                     except Exception as err:
-                        log.error(f"平倉重試 {retry_attempt+1} 錯誤: {err}")
-                        if retry_attempt < 2:
+                        log.error(f"[診斷] 平倉嘗試 {retry_attempt+1} 錯誤: {err}")
+                        if retry_attempt < 4:
                             time.sleep(1)
                 
-                # 設定冷靜期
-                position_resume_at = datetime.now() + timedelta(seconds=POSITION_PAUSE_DURATION)
-                log.warning(f"進入吃單後冷靜期 {POSITION_PAUSE_DURATION//60} 分鐘")
-                print(f"🧊 進入 {POSITION_PAUSE_DURATION//60} 分鐘冷靜期，暫停掛單...")
+                # [修改] 只有在確認平倉成功後才進入冷靜期
+                final_position = trading_bot.query_current_position()
+                final_qty = float(final_position.get('qty', 0)) if final_position else 0
                 
-                time.sleep(2)
-                continue
+                if final_qty == 0:
+                    position_resume_at = datetime.now() + timedelta(seconds=POSITION_PAUSE_DURATION)
+                    log.warning(f"[診斷] 平倉成功，進入吃單後冷靜期 {POSITION_PAUSE_DURATION//60} 分鐘")
+                    print(f"🧊 進入 {POSITION_PAUSE_DURATION//60} 分鐘冷靜期，暫停掛單...")
+                    time.sleep(2)
+                    continue
+                else:
+                    log.critical(f"[診斷] ⚠️ 平倉未完成 (剩餘: {final_qty})，不進入冷靜期，繼續嘗試")
+                    print(f"🚨 平倉未完成 (剩餘: {final_qty})，繼續嘗試...")
+                    time.sleep(2)
+                    continue
 
             # 獲取當前價格
             reference_price = trading_bot.market_stream.fetch_current_price()
@@ -1204,13 +1223,30 @@ def execute_trading_strategy():
                 time_remaining = int((volatility_resume_at - datetime.now()).total_seconds())
                 historical_prices.clear()
                 
-                os.system('cls' if os.name == 'nt' else 'clear')
-                print("=== ❄️ 市場趨勢過大，進入冷靜期 ❄️ ===")
-                print(f"⏰ 剩餘時間: {time_remaining // 60}分 {time_remaining % 60}秒")
-                print(f"📊 目前價格: {int(reference_price):,}")
-                print("🛡️ 暫停掛單中，等待行情穩定...")
-                time.sleep(1)
-                continue
+                # [新增] 波動保護冷靜期內也要檢查持倉！
+                log.info(f"[診斷] 波動保護冷靜期中，檢查持倉狀態...")
+                position = trading_bot.query_current_position()
+                if position:
+                    raw_qty = float(position.get('qty', 0))
+                    if raw_qty != 0:
+                        log.critical(f"[診斷] ⚠️ 波動保護冷靜期內發現未平倉持倉: {raw_qty}")
+                        print(f"🚨 [診斷] 波動保護冷靜期內發現持倉 {raw_qty}，立即處理！")
+                        # 不要continue，讓程式繼續執行平倉邏輯
+                    else:
+                        log.info(f"[診斷] 波動保護冷靜期內持倉正常 (0)")
+                else:
+                    log.info(f"[診斷] 波動保護冷靜期內無持倉資料")
+                
+                # 如果沒有持倉問題，才顯示冷靜期畫面
+                if not position or float(position.get('qty', 0)) == 0:
+                    os.system('cls' if os.name == 'nt' else 'clear')
+                    print("=== ❄️ 市場趨勢過大，進入冷靜期 ❄️ ===")
+                    print(f"⏰ 剩餘時間: {time_remaining // 60}分 {time_remaining % 60}秒")
+                    print(f"📊 目前價格: {int(reference_price):,}")
+                    print("🛡️ 暫停掛單中，等待行情穩定...")
+                    print(f"[診斷] 持倉狀態: 0 (正常)")
+                    time.sleep(1)
+                    continue
 
             # 記錄價格歷史
             current_timestamp = time.time()
@@ -1276,9 +1312,9 @@ def execute_trading_strategy():
             if market_is_dangerous:
                 print(f"🌊 偵測到危險行情! 原因: {danger_reason}")
                 if orderbook_imbalance is not None and imbalance_magnitude > ORDERBOOK_IMBALANCE_LIMIT:
-                    print(f"🛡️ 撤銷所有訂單並暫停交易 {pause_duration} 秒...")
+                    print(f"🛡️ 撤銷所有訂單、檢查平倉並暫停交易 {pause_duration} 秒...")
                 else:
-                    print(f"🛡️ 撤銷所有訂單並暫停交易 {pause_duration//60} 分鐘...")
+                    print(f"🛡️ 撤銷所有訂單、檢查平倉並暫停交易 {pause_duration//60} 分鐘...")
                 log.warning(f"觸發風控保護: {danger_reason}")
                 
                 # 記錄風控觸發數據（僅 OBI 和短期波動）
@@ -1313,7 +1349,77 @@ def execute_trading_strategy():
                 for worker in cancel_workers:
                     worker.join(timeout=2)
                 
-                log.info("訂單已撤銷，進入冷靜期")
+                log.info("訂單已撤銷")
+                
+                # 檢查並平倉持倉
+                position = trading_bot.query_current_position()
+                if position:
+                    position_qty = float(position.get('qty', 0))
+                    if position_qty != 0:
+                        print(f"⚠️ 檢測到持倉 {position_qty}，執行緊急平倉...")
+                        log.warning(f"風控保護觸發時檢測到持倉: {position_qty}")
+                        
+                        closing_side = 'sell' if position_qty > 0 else 'buy'
+                        close_success = False
+                        
+                        # 執行平倉（最多嘗試5次）
+                        for retry_attempt in range(5):
+                            try:
+                                log.info(f"[診斷] 波動保護開始第 {retry_attempt+1}/5 次平倉嘗試")
+                                close_result = trading_bot.execute_market_close(closing_side, abs(position_qty))
+                                
+                                if not close_result:
+                                    log.error(f"[診斷] 波動保護平倉API失敗 ({retry_attempt+1}/5)")
+                                    if retry_attempt < 4:
+                                        print(f"⚠️ 平倉API失敗，重試中... ({retry_attempt+1}/5)")
+                                        time.sleep(1)
+                                        continue
+                                
+                                # [修改] 增加等待時間
+                                time.sleep(2)
+                                
+                                # 確認平倉（多次確認）
+                                verify_position = trading_bot.query_current_position()
+                                current_qty = float(verify_position.get('qty', 0)) if verify_position else 0
+                                log.info(f"[診斷] 波動保護第1次確認: {current_qty}")
+                                
+                                # [新增] 二次確認
+                                if current_qty != 0:
+                                    log.warning(f"[診斷] 波動保護持倉非0，二次確認...")
+                                    time.sleep(1)
+                                    verify_position = trading_bot.query_current_position()
+                                    current_qty = float(verify_position.get('qty', 0)) if verify_position else 0
+                                    log.info(f"[診斷] 波動保護第2次確認: {current_qty}")
+                                
+                                if verify_position and current_qty != 0:
+                                    log.warning(f"平倉嘗試 {retry_attempt+1}/5 未完成")
+                                    if retry_attempt < 4:
+                                        print(f"⚠️ 平倉未完成，重試中... ({retry_attempt+1}/5)")
+                                        time.sleep(1)
+                                        continue
+                                    else:
+                                        print(f"❌ 平倉失敗5次，不進入冷靜期，持續嘗試平倉！")
+                                        log.critical("風控保護平倉失敗5次，跳過冷靜期繼續嘗試")
+                                else:
+                                    print(f"✅ 持倉已平倉！")
+                                    log.info("風控保護平倉成功")
+                                    close_success = True
+                                    break
+                            except Exception as err:
+                                log.error(f"風控保護平倉嘗試 {retry_attempt+1} 錯誤: {err}")
+                                if retry_attempt < 4:
+                                    time.sleep(1)
+                        
+                        # 如果5次都失敗，不進入冷靜期，繼續嘗試平倉
+                        if not close_success:
+                            print(f"🚨 平倉未完成，將持續嘗試平倉，不進入冷靜期！")
+                            log.critical("平倉失敗，跳過冷靜期，繼續主循環嘗試平倉")
+                            time.sleep(2)
+                            continue  # 不設定 volatility_resume_at，直接回到主循環繼續嘗試
+                        
+                        time.sleep(1)
+                
+                log.info("進入冷靜期")
                 volatility_resume_at = datetime.now() + timedelta(seconds=pause_duration)
                 time.sleep(1)
                 continue
